@@ -92,7 +92,9 @@ class CoupRequestHandler(SocketServer.BaseRequestHandler):
         Boots a player from the server
         '''
         def kick(self, player, parts):
-            return player.conn.close()
+            vote = Vote(self.cg.players, "kick", 10, 45, self.showHand, self.showHand)
+            #return player.conn.close()
+            return
 
         '''
         Prints the target player's current hand, or display's the current player's hand if no name is provided
@@ -288,8 +290,7 @@ class CoupRequestHandler(SocketServer.BaseRequestHandler):
                     raise NotYourTurnError(self.request)
 
                 self.broadcast_message("{} is done moving.\nYou may now /accept or /challenge the move.\n".format(player.name))
-                challengeThread = threading.Thread( target = self.cg.players.challengeWindow )
-                challengeThread.start()
+                #TODO initiate vote here
 
             except (UnregisteredPlayerError, NotYourTurnError) as e:
                 pass
@@ -306,7 +307,9 @@ class CoupRequestHandler(SocketServer.BaseRequestHandler):
                 if self.cg.players.isPlayersTurn(player):
                     raise InvalidCommandError(self.request, "You can't challenge your own move.")
 
-                self.broadcast_message( self.cg.players.addTurnChallenge(player) )
+                #TODO vote here
+                vote = self.cg.players.getVote("kick")
+                vote.vote(player, True)
             except (UnregisteredPlayerError, InvalidCommandError) as e:
                 pass
 
@@ -323,7 +326,7 @@ class CoupRequestHandler(SocketServer.BaseRequestHandler):
                 if self.cg.players.isPlayersTurn(player):
                     raise InvalidCommandError(self.request, "You can't accept your own move.")
 
-                self.broadcast_message( self.cg.players.addTurnApproval(player) )
+                #TODO vote here
             except (UnregisteredPlayerError, InvalidCommandError) as e:
                 pass
 
@@ -425,20 +428,16 @@ class PlayerQueue():
     def __init__(self):
         #Initialize a queue structure that contains players
         self.players = deque([],maxlen=6)
-        self.turnApprovals = []
-        self.turnChallenges = []
+        self.ongoingVotes = {}
+
+    def getVote(self, name):
+        if name in self.ongoingVotes.keys():
+            return self.ongoingVotes[name]
+        return None
 
     '''Add a player to the turn queue'''
     def addPlayer(self, player):
             self.players.append(player)
-
-    def addTurnApproval(self, player):
-            self.turnApprovals.append(player)
-            return "{0} has accepted {1}'s move.\n".format(player.name, self.getCurrentPlayer().name)
-
-    def addTurnChallenge(self, player):
-            self.turnChallenges.append(player)
-            return "{0} has challenged {1}'s move.\n".format(player.name, self.getCurrentPlayer().name)
 
     '''Remove a player from the turn queue'''
     def removePlayer(self, player):
@@ -480,39 +479,9 @@ class PlayerQueue():
     def list(self):
         return list(self.players)
 
-    '''A thread that runs for 45 seconds while players approve/challenge a turn'''
-    def challengeWindow(self):
-        for i in range(45):
-            time.sleep(1)
-            print "{} seconds into challenge...\n".format(i)
-            status = self.challengeStatus()
-            if status == 1:
-                print "All players accepted the move"
-                return self.advanceTurn()
-            elif status == -1:
-                print "Someone challenged the move"
-                return self.advanceTurn()
-        return self.advanceTurn()
-
-    '''
-    Returns the status of the current challenge.
-    0 is neither fully approved nor challenged
-    1 is fully approved
-    -1 is challenged
-    '''
-    def challengeStatus(self):
-        if self.turnChallenges:
-            return -1
-        elif self.turnApprovals:
-            if set(self.players.list()) == set(self.turnApprovals):
-                return 1
-        return 0
-
     '''Cycle the turn so that the next player in line is now set to move'''
     def advanceTurn(self):
         self.players.rotate(1)
-        self.turnApprovals = []
-        self.turnChallenges = []
         return "It is now {}'s turn to move.\n".format(self.getCurrentPlayer().name)
 
 
@@ -531,6 +500,96 @@ class CoupGame(object):
 
                 #deck shuffled
                 self.deck.shuffle()
+
+'''
+timeout - number of seconds the vote lasts for
+options - a list of voteOptions that players can vote for
+successFunction - the function that runs if the vote passes
+failFunction - the function that runs if the vote fails
+eligiblePlayers - the players that are able to vote in this vote
+'''
+class Vote(object):
+    def __init__(self, playerQueue, name, timeout, passThreshhold, successFunction, failFunction):
+        #Votes is a list of players that have voted in favor
+        self.timeout = timeout
+        self.name = name
+        self.playerQueue = playerQueue
+        self.playerList = self.playerQueue.list()
+
+        self.successFunction = successFunction
+        self.failFunction = failFunction
+
+        self.yesList = []
+        self.noList = []
+        self.passThreshhold = passThreshhold
+
+        self.voteThread = threading.Thread( target = self.startVote )
+        self.voteThread.start()
+        self.concluded = False
+
+    '''
+    Initiates a vote that lasts for timeout seconds
+    '''
+    def startVote(self):
+        self.playerQueue.ongoingVotes[self.name] = self
+        timer = 0
+        while timer <= self.timeout:
+            time.sleep(1)
+            timer += 1
+            print "{} seconds into vote...\n".format(i)
+            if self.concluded:
+                return
+        if not self.concluded:
+            return self.voteFail()
+
+    '''
+    Checks to see if the vote has reached a conclusion
+    '''
+    def checkResults(self):
+        #Number of people eligible to vote
+        eligibleVotes = len(self.playerList)
+        #Number of people voting YES
+        yesVotes = len(self.yesList)
+        #Percentage of eligible voters voting YES
+        yesPercent = int((yesVotes/eligibleVotes)*100)
+        #Percentage of eligible voters voting NO
+        noPercent = 1 - yesPercent
+
+        if yesPercent >= self.passThreshhold:
+            self.votePass()
+        elif noPercent >= (1 - self.passThreshhold):
+            self.voteFail()
+
+    '''
+    Allows a player to vote for a particular option
+    '''
+    def vote(self, player, vote):
+        try:
+            if player in self.playerList:
+                if player not in self.yesList or player not in self.noList:
+                    if vote:
+                        self.yesList.append(player)
+                    else:
+                        self.noList.append(player)
+                    self.checkResults()
+                else:
+                    raise InvalidCommandError(player.conn, "You already voted in this poll")
+            else:
+                raise InvalidCommandError(player.conn, "You are not eligible to vote in this poll")
+        except InvalidCommandError:
+            pass
+
+    def votePass(self):
+        self.successFunction()
+        del self.playerQueue.ongoingVotes[self.name]
+        self.concluded = True
+        self.voteThread.exit()
+
+    def voteFail(self):
+        self.failFunction()
+        del self.playerQueue.ongoingVotes[self.name]
+        self.concluded = True
+        self.voteThread.exit()
 
 class Player(object):
         def __init__(self, conn, name, card1, card2):
@@ -644,7 +703,7 @@ def handler_factory(callback):
 
 if __name__ == "__main__":
     print "Welcome to COUP!\n"
-    HOST, PORT = "130.215.249.79", 8009
+    HOST, PORT = "localhost", 8035
 
     cg = CoupGame()
     server = CoupServer((HOST, PORT), handler_factory(cg) )
