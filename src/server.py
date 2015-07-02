@@ -246,7 +246,7 @@ class CoupRequestHandler(SocketServer.BaseRequestHandler):
         '''
         Performs an assassination on another player
         '''
-        def assasinate(self, player, parts):
+        def assassinate(self, player, parts):
             try:
                 if player is None:
                     raise UnregisteredPlayerError(self.request)
@@ -255,11 +255,11 @@ class CoupRequestHandler(SocketServer.BaseRequestHandler):
                     raise NotYourTurnError(self.request)
 
                 if len(parts) < 2:
-                    raise InvalidCommandError(self.request, "You need to specify a player (by name) that you want to assasinate\n")
+                    raise InvalidCommandError(self.request, "You need to specify a player (by name) that you want to assassinate\n")
 
                 name = parts[1]
                 if name == player.name:
-                    raise InvalidCommandError(self.request, "You cannot assasinate yourself. Nice try.\n")
+                    raise InvalidCommandError(self.request, "You cannot assassinate yourself. Nice try.\n")
 
                 if player.coins < 3:
                     raise NotEnoughCoinsError(self.request)
@@ -270,7 +270,7 @@ class CoupRequestHandler(SocketServer.BaseRequestHandler):
 
                 player.coins -= 3
                 self.cg.treasury += 3
-                self.broadcast_message("{0} assasinated one of {1}'s cards!.\n".format(player.name, target.name))
+                self.broadcast_message("{0} assassinated one of {1}'s cards!.\n".format(player.name, target.name))
                 self.broadcast_message(target.killRandomCardInHand())
                 self.broadcast_message(self.cg.players.advanceTurn())
             except (UnregisteredPlayerError, NotYourTurnError, InvalidCommandError, NoSuchPlayerError, NotEnoughCoinsError) as e:
@@ -287,9 +287,44 @@ class CoupRequestHandler(SocketServer.BaseRequestHandler):
                 if not self.cg.players.isPlayersTurn(player):
                     raise NotYourTurnError(self.request)
 
-                self.broadcast_message("{} ended his turn.\n".format(player.name))
-                self.broadcast_message(self.cg.players.advanceTurn())
+                self.broadcast_message("{} is done moving.\nYou may now /accept or /challenge the move.\n".format(player.name))
+                challengeThread = threading.Thread( target = self.cg.players.challengeWindow )
+                challengeThread.start()
+
             except (UnregisteredPlayerError, NotYourTurnError) as e:
+                pass
+
+
+        '''
+        Issues a challenge of the current player's move
+        '''
+        def challengeTurn(self, player, parts):
+            try:
+                if player is None:
+                    raise UnregisteredPlayerError(self.request)
+
+                if self.cg.players.isPlayersTurn(player):
+                    raise InvalidCommandError(self.request, "You can't challenge your own move.")
+
+                self.broadcast_message( self.cg.players.addTurnChallenge(player) )
+            except (UnregisteredPlayerError, InvalidCommandError) as e:
+                pass
+
+        '''
+        Issues acceptance of the current player's move
+        TODO: split into helper functions to remove duplicate code
+        TODO: ensure that a player has actually made a move before accepts or challenges can be made
+        '''
+        def acceptTurn(self, player, parts):
+            try:
+                if player is None:
+                    raise UnregisteredPlayerError(self.request)
+
+                if self.cg.players.isPlayersTurn(player):
+                    raise InvalidCommandError(self.request, "You can't accept your own move.")
+
+                self.broadcast_message( self.cg.players.addTurnApproval(player) )
+            except (UnregisteredPlayerError, InvalidCommandError) as e:
                 pass
 
         '''
@@ -367,14 +402,18 @@ class CoupRequestHandler(SocketServer.BaseRequestHandler):
                     self.foreign_aid(player,parts)
                 elif command == "/coup":
                     self.coup(player, parts)
-                elif command == "/assasinate":
-                    self.assasinate(player, parts)
+                elif command == "/assassinate":
+                    self.assassinate(player, parts)
                 elif command == "/register":
                     self.register(parts)
                 elif command == "/ready":
                     self.ready(player, parts)
                 elif command == "/endturn":
                     self.endturn(player, parts)
+                elif command == "/challenge":
+                    self.challengeTurn(player, parts)
+                elif command == "/accept":
+                    self.acceptTurn(player, parts)
                 elif command == "/players":
                     self.listplayers(parts)
                 elif command != "":
@@ -386,10 +425,20 @@ class PlayerQueue():
     def __init__(self):
         #Initialize a queue structure that contains players
         self.players = deque([],maxlen=6)
+        self.turnApprovals = []
+        self.turnChallenges = []
 
     '''Add a player to the turn queue'''
     def addPlayer(self, player):
             self.players.append(player)
+
+    def addTurnApproval(self, player):
+            self.turnApprovals.append(player)
+            return "{0} has accepted {1}'s move.\n".format(player.name, self.getCurrentPlayer().name)
+
+    def addTurnChallenge(self, player):
+            self.turnChallenges.append(player)
+            return "{0} has challenged {1}'s move.\n".format(player.name, self.getCurrentPlayer().name)
 
     '''Remove a player from the turn queue'''
     def removePlayer(self, player):
@@ -431,9 +480,39 @@ class PlayerQueue():
     def list(self):
         return list(self.players)
 
+    '''A thread that runs for 45 seconds while players approve/challenge a turn'''
+    def challengeWindow(self):
+        for i in range(45):
+            time.sleep(1)
+            print "{} seconds into challenge...\n".format(i)
+            status = self.challengeStatus()
+            if status == 1:
+                print "All players accepted the move"
+                return self.advanceTurn()
+            elif status == -1:
+                print "Someone challenged the move"
+                return self.advanceTurn()
+        return self.advanceTurn()
+
+    '''
+    Returns the status of the current challenge.
+    0 is neither fully approved nor challenged
+    1 is fully approved
+    -1 is challenged
+    '''
+    def challengeStatus(self):
+        if self.turnChallenges:
+            return -1
+        elif self.turnApprovals:
+            if set(self.players.list()) == set(self.turnApprovals):
+                return 1
+        return 0
+
     '''Cycle the turn so that the next player in line is now set to move'''
     def advanceTurn(self):
         self.players.rotate(1)
+        self.turnApprovals = []
+        self.turnChallenges = []
         return "It is now {}'s turn to move.\n".format(self.getCurrentPlayer().name)
 
 
@@ -565,7 +644,7 @@ def handler_factory(callback):
 
 if __name__ == "__main__":
     print "Welcome to COUP!\n"
-    HOST, PORT = "localhost", 7086
+    HOST, PORT = "130.215.249.79", 8009
 
     cg = CoupGame()
     server = CoupServer((HOST, PORT), handler_factory(cg) )
